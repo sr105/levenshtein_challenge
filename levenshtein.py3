@@ -8,18 +8,11 @@ import string
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures import ThreadPoolExecutor
 
-def lower_and_only_alpha(s):
-    """ Convert to lowercase and strip out non-letters"""
-    return s.strip()
-    #return re.sub(r'[^a-z]', r'', s.strip().lower())
-    #return re.sub(r'[\']', r'', s.strip().lower())
-
 #
 # LevenshteinDistance implementations from Wikipedia
 # https://en.wikipedia.org/wiki/Levenshtein_distance#Computing_Levenshtein_distance
 #
 
-# len_s and len_t are the number of characters in string s and t respectively
 def LevenshteinDistance_SlowAsHell(s, t, max = None):
   # base case: empty strings
   if not s:
@@ -73,47 +66,76 @@ def LevenshteinDistance(s, t, max = None):
         
     return v1[len(t)]
 
-def read_wordlist(f):
-    return [ lower_and_only_alpha(s) for s in f.readlines() ]
+#
+# itertools recipes
+#
 
-# from itertools recipes
+# From [ iterator, [...], iterator ] To [ item, item, item, ... ]
 def flatten(listOfLists):
     "Flatten one level of nesting"
     return itertools.chain.from_iterable(listOfLists)
 
-# from itertools recipes
 def grouper(iterable, n, fillvalue=None):
     "Collect data into fixed-length chunks or blocks"
     # grouper('ABCDEFG', 3, 'x') --> ABC DEF Gxx"
     args = [iter(iterable)] * n
     return itertools.zip_longest(*args, fillvalue=fillvalue)
 
+#
+# Method 1: Calculating Levenshtein Distance
+#
+
+def real_list_of_friends(word, words):
+    """Return all words of distance <= 1 to word"""    
+    return [ w for w in words if LevenshteinDistance(word, w, max=1) == 1 ]
+
 def pool_list_of_friends(word, words, nprocs):
-    # Let the executor divide the work among processes by using 'map'.
+    """Run real_list_of_friends() in parallel dividing
+       up the words to process"""
+    
+    # Choose multi-process or multi-threaded:
     with ProcessPoolExecutor(max_workers=nprocs) as executor:
     #with ThreadPoolExecutor(max_workers=nprocs) as executor:
+        # - break the word list up into nprocs pieces
         list_of_friends_for_word = functools.partial(real_list_of_friends, word)
         chunksize = len(words) // nprocs
         lists_of_words = grouper(words, chunksize)
+        # - handout the pieces and collect the results
         results = executor.map(list_of_friends_for_word, lists_of_words)
+        # - return a simple list (the results are a list of iterators)
         return list(flatten(results))
 
-def pool_list_of_friends2(word, words, nprocs):
-    # Let the executor divide the work among processes by using 'map'.
+
+#
+# Method 2: Calculating all 1-distance permutations of
+#           word and looking them up in the word list
+#
+
+def real_list_of_friends_using_permutations(words, permutations):
+    return { w for w in permutations if w in words }
+
+def pool_list_of_friends_using_permutations(word, words, nprocs):
+    """Run real_list_of_friends_using_permutations() in
+       parallel dividing up the permutations to process"""
+
+    # Choose multi-process or multi-threaded:
     #with ProcessPoolExecutor(max_workers=nprocs) as executor:
     with ThreadPoolExecutor(max_workers=nprocs) as executor:
-        list_of_friends_for_word = functools.partial(real_list_of_friends2, words)
+        list_of_friends_for_word = functools.partial(real_list_of_friends_using_permutations, words)
+        # - break the permutations list up into nprocs pieces
         permutations = set(list_of_distance1_permutations(word))
         chunksize = max(1, len(permutations) // nprocs)
         lists_of_permutations = grouper(permutations, chunksize)
+        # - handout the pieces and collect the results
         results = executor.map(list_of_friends_for_word, lists_of_permutations)
+        # - return a simple list (the results are a list of iterators)
         return list(flatten(results))
 
 def list_of_distance1_permutations(word):
-    # abc
+    # Example word: abc
     # What are all of the distance = 1 variations?
     # for each position in string including -1 and +1: [ '', 'a', 'b', 'c', '']
-    # replace current with one from this set: [ '', '[a-z]' ]
+    # replace current or insert with one from this set: [ '', '[a-z]' ]
     wordarray = [ '' ] + list(word) + [ '' ]
     chars = [ '' ] + list(string.ascii_lowercase)
     results = []
@@ -125,19 +147,42 @@ def list_of_distance1_permutations(word):
             yield pre + c + post1
             yield pre + c + post2
 
-def real_list_of_friends(word, words):
-    return [ w for w in words if LevenshteinDistance(word, w, max=1) == 1 ]
-
-def real_list_of_friends2(words, permutations):
-    return { w for w in permutations if w in words }
+#
+# Running and managing the individual algorithms
+#
 
 def list_of_friends(word, words):
-    #return real_list_of_friends(word, words)
-    #return pool_list_of_friends(word, words, 16)
-    #return real_list_of_friends2(words, list_of_distance1_permutations(word))
-    return pool_list_of_friends2(word, words, 16)
+    """Get the list of friends for word"""
+
+    # Single or Multi-threaded
+    # - can be multi-process, too. Search this file for PoolExecutor)
+    single_threaded = False
+    # Use a calculated levenshtein distance method or
+    # use a permutations lookup method
+    use_distance_method = False
+
+    if single_threaded:
+        if use_distance_method:
+            return real_list_of_friends(word, words)
+        permutations = list_of_distance1_permutations(word)
+        # note the reversed arguments (compared to the others)...
+        return real_list_of_friends_using_permutations(words, permutations)
+
+    if use_distance_method:
+        return pool_list_of_friends(word, words, 16)
+    return pool_list_of_friends_using_permutations(word, words, 16)
+
 
 def find_friend_tree(word, wordlist):
+    """Return a dictionary, { a_word: [ a_word's friend list] }, of
+       word and all of its friends.
+
+       Algorithm:
+           Find all friends for word. Then find all of their friends, etc.
+           Every friend gets an entry in a map. The resulting network size
+           is the list of keys. Make sure not to check words we've already
+           seen before."""
+
     tree = {}
     words = [ word ]
     while True:
@@ -153,6 +198,19 @@ def find_friend_tree(word, wordlist):
             break
     return tree
 
+#
+# Input Parsing
+#
+
+def lower_and_only_alpha(s):
+    """ Convert to lowercase and strip out non-letters"""
+    # just strip for now because the inputs are only lowercase
+    return s.strip()
+    #return re.sub(r'[^a-z]', r'', s.strip().lower())
+
+def read_wordlist(f):
+    return { lower_and_only_alpha(s) for s in f.readlines() }
+
 def read_input_words(f):
     words = []
     while True:
@@ -163,15 +221,17 @@ def read_input_words(f):
         words.append(word)
     return words
 
-def read_input(f):
+def read_and_process_input(f):
     words = read_input_words(f)
-    wordlist = set(read_wordlist(f))
+    wordlist = read_wordlist(f)
     for word in words:
         tree = find_friend_tree(word, wordlist)
         print(len(tree.keys()))
 
-if len(sys.argv) < 2 or sys.argv[1] == '-':
-    read_input(sys.stdin)
-else:
-    with open(sys.argv[1], 'r') as f:
-        read_input(f)
+#
+# main()
+# all input from the provided filename
+#
+
+with open(sys.argv[1], 'r') as f:
+    read_and_process_input(f)
